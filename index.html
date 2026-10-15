@@ -49,7 +49,7 @@ button:focus-visible,.btn:focus-visible,select:focus-visible,textarea:focus-visi
 button:disabled{opacity:.45;cursor:not-allowed}
 .primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
 .big{width:100%;min-height:62px;font-size:21px}
-.pick{position:relative}
+.pick{position:relative;display:flex;flex-direction:column;gap:10px}
 .pick input{position:absolute;width:1px;height:1px;opacity:0}
 .fileinfo{font-size:17px;word-break:break-all}
 .fileinfo b{font-weight:900}
@@ -101,7 +101,7 @@ footer{color:var(--sub);font-size:15px;line-height:1.7}
       <g fill="#f4f2ee"><rect x="300" y="196" width="28" height="120" rx="14"/><rect x="344" y="146" width="28" height="220" rx="14"/><rect x="388" y="216" width="28" height="80" rx="14"/></g>
     </svg>
     <div class="htext">
-      <h1>影片轉音檔 <span class="ver" id="ver">v1.1.0</span></h1>
+      <h1>影片轉音檔 <span class="ver" id="ver">v1.1.1</span></h1>
       <p class="tag">支援 MP4、MOV、WebM、MKV 等手機常見格式。</p>
     </div>
   </header>
@@ -109,8 +109,10 @@ footer{color:var(--sub);font-size:15px;line-height:1.7}
   <section class="step" aria-labelledby="s1">
     <h2 id="s1"><span class="num">1</span>選擇影片</h2>
     <div class="pick">
-      <input type="file" id="file" accept="video/*,audio/*,.mp4,.m4v,.mov,.mkv,.webm,.3gp,.m4a">
-      <label for="file" class="btn primary big" id="pickBtn">選擇影片檔</label>
+      <input type="file" id="file" accept="video/*">
+      <label for="file" class="btn primary big" id="pickBtn">從相簿選影片</label>
+      <input type="file" id="file2">
+      <label for="file2" class="btn big" id="pickBtn2">從「我的檔案」選</label>
     </div>
     <div class="fileinfo" id="fileinfo"><p class="hint">微信聊天裡的影片：點開影片 → 長按 →「保存視頻」，存到手機後再從這裡選。</p></div>
     <video id="vid" controls playsinline preload="metadata" hidden></video>
@@ -187,7 +189,7 @@ footer{color:var(--sub);font-size:15px;line-height:1.7}
 <script src="https://cdnjs.cloudflare.com/ajax/libs/lamejs/1.2.1/lame.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/opencc-js@1.0.5/dist/umd/cn2t.js"></script>
 <script>
-const VERSION='v1.1.0';
+const VERSION='v1.1.1';
 const TF_URL='https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.7.5';
 const $=id=>document.getElementById(id);
 $('ver').textContent=VERSION;
@@ -216,17 +218,17 @@ function updTrim(){
 
 document.querySelectorAll('input[name=fmt]').forEach(r=>r.addEventListener('change',()=>{$('mp3opts').hidden=fmt()!=='mp3';}));
 
-$('file').addEventListener('change',e=>{
+function onPick(e){
   const f=e.target.files&&e.target.files[0];if(!f)return;
   file=f;tS=0;tE=null;dur=0;
   $('fileinfo').innerHTML='<b>'+esc(f.name)+'</b><div class="meta">'+fmtSize(f.size)+'</div>';
   const v=$('vid');if(v.src)URL.revokeObjectURL(v.src);
   v.src=URL.createObjectURL(f);v.hidden=false;
-  $('pickBtn').textContent='換一個影片';
   ['setStart','setEnd'].forEach(id=>$(id).disabled=false);
   $('go').disabled=busy;$('tgo').disabled=tbusy;$('result').hidden=true;setBar(0);setTBar(0);
   setStatus('已選好影片，按「開始擷取」。');setTStatus('按「產生逐字稿」開始。');updTrim();
-});
+}
+$('file').addEventListener('change',onPick);$('file2').addEventListener('change',onPick);
 $('vid').addEventListener('loadedmetadata',()=>{dur=$('vid').duration||0;
   const m=$('fileinfo').querySelector('.meta');if(m)m.textContent=fmtSize(file.size)+'　·　'+fmtT(dur);updTrim();});
 $('setStart').onclick=()=>{const t=$('vid').currentTime;if(tE!=null&&t>=tE){setStatus('開始時間要早於結束時間。','err');return;}tS=t;updTrim();};
