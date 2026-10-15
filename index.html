@@ -101,7 +101,7 @@ footer{color:var(--sub);font-size:15px;line-height:1.7}
       <g fill="#f4f2ee"><rect x="300" y="196" width="28" height="120" rx="14"/><rect x="344" y="146" width="28" height="220" rx="14"/><rect x="388" y="216" width="28" height="80" rx="14"/></g>
     </svg>
     <div class="htext">
-      <h1>影片轉音檔 <span class="ver" id="ver">v1.1.3</span></h1>
+      <h1>影片轉音檔 <span class="ver" id="ver">v1.1.4</span></h1>
       <p class="tag">支援 MP4、MOV、WebM、MKV 等手機常見格式。</p>
     </div>
   </header>
@@ -189,7 +189,7 @@ footer{color:var(--sub);font-size:15px;line-height:1.7}
 <script src="https://cdnjs.cloudflare.com/ajax/libs/lamejs/1.2.1/lame.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/opencc-js@1.0.5/dist/umd/cn2t.js"></script>
 <script>
-const VERSION='v1.1.3';
+const VERSION='v1.1.4';
 const TF_URL='https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.7.5';
 const $=id=>document.getElementById(id);
 $('ver').textContent=VERSION;
@@ -235,35 +235,39 @@ $('setStart').onclick=()=>{const t=$('vid').currentTime;if(tE!=null&&t>=tE){setS
 $('setEnd').onclick=()=>{const t=$('vid').currentTime;if(t<=tS){setStatus('結束時間要晚於開始時間。','err');return;}tE=t;updTrim();};
 $('clearTrim').onclick=()=>{tS=0;tE=null;updTrim();};
 
-/* ---------- AAC：直接取出原始音軌 ---------- */
+/* ---------- 取出影片裡的音軌（不解碼） ---------- */
 const SR_TABLE=[96000,88200,64000,48000,44100,32000,24000,22050,16000,12000,11025,8000,7350];
 async function isMP4(f){try{const h=new Uint8Array(await f.slice(4,8).arrayBuffer());return String.fromCharCode(...h)==='ftyp';}catch(e){return false;}}
-function extractAAC(file,opts){
+function extractAudio(file,opts){
   const {start=0,end=Infinity,onProgress=()=>{}}=opts||{};
   return new Promise((resolve,reject)=>{
     const mp4=MP4Box.createFile();
-    let track=null,hdr=null,parts=[],done=false,got=0,total=0,failed=false;
+    let track=null,info=null,frames=[],times=[],done=false,got=0,total=0,failed=false;
     const fail=e=>{if(!failed){failed=true;reject(e);}};
     mp4.onError=()=>fail(new Error('PARSE'));
-    mp4.onReady=info=>{
-      track=info.audioTracks&&info.audioTracks[0];
+    mp4.onReady=inf=>{
+      track=inf.audioTracks&&inf.audioTracks[0];
       if(!track)return fail(new Error('NO_AUDIO'));
-      if(!/^mp4a/.test(track.codec))return fail(new Error('NOT_AAC'));
-      let asc;try{asc=mp4.getTrackById(track.id).mdia.minf.stbl.stsd.entries[0].esds.esd.descs[0].descs[0].data;}catch(e){}
-      if(!asc||asc.length<2)return fail(new Error('NOT_AAC'));
-      let ot=asc[0]>>3;const fi=((asc[0]&7)<<1)|(asc[1]>>7);const ch=(asc[1]>>3)&15;
-      if(ot>4||ot<1)ot=2;
-      hdr={p:ot-1,fi,ch,sr:SR_TABLE[fi]||44100};total=track.nb_samples;
+      info={codec:track.codec,sr:(track.audio&&track.audio.sample_rate)||44100,ch:(track.audio&&track.audio.channel_count)||2,asc:null,adts:null};
+      if(/^mp4a/.test(track.codec)){
+        let asc;try{asc=mp4.getTrackById(track.id).mdia.minf.stbl.stsd.entries[0].esds.esd.descs[0].descs[0].data;}catch(e){}
+        if(asc&&asc.length>=2){
+          info.asc=new Uint8Array(asc);
+          let ot=asc[0]>>3;const fi=((asc[0]&7)<<1)|(asc[1]>>7);const ch=(asc[1]>>3)&15;
+          if(ot>4||ot<1)ot=2;
+          info.adts={p:ot-1,fi,ch};
+          if(SR_TABLE[fi])info.sr=SR_TABLE[fi];
+          if(ch)info.ch=ch;
+        }
+      }
+      total=track.nb_samples;
       mp4.setExtractionOptions(track.id,null,{nbSamples:500});mp4.start();
     };
     mp4.onSamples=(id,user,samples)=>{
       for(const s of samples){
         const t=s.cts/s.timescale;got++;
         if(t<start||t>=end)continue;
-        const len=s.data.length+7,h=new Uint8Array(len);
-        h[0]=0xFF;h[1]=0xF1;h[2]=(hdr.p<<6)|(hdr.fi<<2)|(hdr.ch>>2);
-        h[3]=((hdr.ch&3)<<6)|(len>>11);h[4]=(len>>3)&0xFF;h[5]=((len&7)<<5)|0x1F;h[6]=0xFC;
-        h.set(s.data,7);parts.push(h);
+        frames.push(new Uint8Array(s.data));times.push(t);
       }
       mp4.releaseUsedSamples(id,samples[samples.length-1].number);
       onProgress(total?got/total:0);
@@ -279,40 +283,124 @@ function extractAAC(file,opts){
       if(failed)return;
       mp4.flush();
       if(!track)return fail(new Error('NOT_MP4'));
-      if(!parts.length)return fail(new Error('EMPTY'));
-      resolve({frames:parts,sr:hdr.sr});
+      if(!frames.length)return fail(new Error('EMPTY'));
+      info.frames=frames;info.times=times;
+      resolve(info);
     })().catch(fail);
   });
 }
+function toADTS(info){
+  const a=info.adts;
+  return info.frames.map(d=>{
+    const len=d.length+7,h=new Uint8Array(len);
+    h[0]=0xFF;h[1]=0xF1;h[2]=(a.p<<6)|(a.fi<<2)|(a.ch>>2);
+    h[3]=((a.ch&3)<<6)|(len>>11);h[4]=(len>>3)&0xFF;h[5]=((len&7)<<5)|0x1F;h[6]=0xFC;
+    h.set(d,7);return h;
+  });
+}
+async function extractAAC(file,opts){
+  const info=await extractAudio(file,opts);
+  if(!/^mp4a/.test(info.codec)||!info.adts)throw new Error('NOT_AAC');
+  return {frames:toADTS(info),sr:info.sr};
+}
 
 /* ---------- 分段解碼成 PCM（省記憶體） ---------- */
+async function resampleBlock(chs,srcRate,rate){
+  const len=chs[0].length;
+  if(srcRate===rate||!len)return chs;
+  const n=chs.length,ctx=new OfflineAudioContext(n,Math.max(1,Math.ceil(len*rate/srcRate)),rate);
+  const b=ctx.createBuffer(n,len,srcRate);
+  chs.forEach((c,i)=>b.copyToChannel(c,i));
+  const src=ctx.createBufferSource();src.buffer=b;src.connect(ctx.destination);src.start();
+  const r=await ctx.startRendering();
+  return Array.from({length:n},(_,i)=>r.getChannelData(i));
+}
+function wcCodec(c){c=(c||'').toLowerCase();if(c.startsWith('opus'))return 'opus';if(c.startsWith('mp4a'))return c;if(c==='alaw'||c==='ulaw')return c;if(c.startsWith('mp3')||c==='.mp3')return 'mp3';return c;}
+async function makeDecoder(info){
+  if(typeof AudioDecoder==='undefined')return null;
+  const base={sampleRate:info.sr,numberOfChannels:info.ch};
+  const cands=[];
+  const codec=wcCodec(info.codec);
+  if(info.asc)cands.push({...base,codec,description:info.asc});
+  cands.push({...base,codec});
+  if(/^mp4a/.test(codec)&&codec!=='mp4a.40.2'&&info.asc)cands.push({...base,codec:'mp4a.40.2',description:info.asc});
+  for(const cfg of cands){try{if((await AudioDecoder.isConfigSupported(cfg)).supported)return cfg;}catch(e){}}
+  return null;
+}
+async function* wcBlocks(info,{rate,secsPerBlock}){
+  const cfg=await makeDecoder(info);
+  if(!cfg)throw new Error('WC_UNSUPPORTED');
+  let out=[],err=null;
+  const dec=new AudioDecoder({output:ad=>{
+      const n=ad.numberOfFrames,c=ad.numberOfChannels,chs=[];
+      for(let i=0;i<Math.min(c,2);i++){const a=new Float32Array(n);ad.copyTo(a,{planeIndex:i,format:'f32-planar'});chs.push(a);}
+      out.push({chs,sr:ad.sampleRate});ad.close();},
+    error:e=>{err=e;}});
+  dec.configure(cfg);
+  const F=info.frames,T=info.times,n=F.length,t0=T[0];
+  let i=0;
+  try{
+    while(i<n){
+      const blockEnd=T[i]+secsPerBlock;
+      while(i<n&&T[i]<blockEnd){
+        dec.decode(new EncodedAudioChunk({type:'key',timestamp:Math.round((T[i]-t0)*1e6),data:F[i]}));
+        i++;
+        if(dec.decodeQueueSize>200)await new Promise(r=>setTimeout(r,0));
+        if(err)throw err;
+      }
+      await dec.flush();
+      if(err)throw err;
+      if(!out.length)continue;
+      const sr=out[0].sr,nc=Math.max(...out.map(o=>o.chs.length)),tot=out.reduce((s,o)=>s+o.chs[0].length,0);
+      const chs=Array.from({length:nc},()=>new Float32Array(tot));
+      let p=0;for(const o of out){for(let k=0;k<nc;k++)chs[k].set(o.chs[Math.min(k,o.chs.length-1)],p);p+=o.chs[0].length;}
+      out=[];
+      const r=await resampleBlock(chs,sr,rate);
+      yield {L:r[0],R:r[1]||r[0],done:i/n};
+    }
+  }finally{try{dec.close();}catch(e){}}
+}
 async function decodeAt(ab,rate){
   const ctx=new OfflineAudioContext(1,1,rate);
   return await ctx.decodeAudioData(ab);
 }
+let lastDecodePath='';
 async function* pcmBlocks(file,{start=0,end=null,rate,secsPerBlock=240,onExtract=()=>{}}){
-  let aac=null;
+  let info=null,why=[];
   if(typeof MP4Box!=='undefined'&&await isMP4(file)){
-    try{aac=await extractAAC(file,{start,end:end==null?Infinity:end,onProgress:onExtract});}
-    catch(e){if(e.message==='NO_AUDIO'||e.message==='EMPTY')throw e;aac=null;}
+    try{info=await extractAudio(file,{start,end:end==null?Infinity:end,onProgress:onExtract});}
+    catch(e){if(e.message==='NO_AUDIO'||e.message==='EMPTY')throw e;why.push('extract:'+e.message);info=null;}
+  }else why.push('not-mp4');
+  // 1) 手機內建音訊解碼器（WebCodecs）
+  if(info){
+    let yielded=false;
+    try{
+      for await(const b of wcBlocks(info,{rate,secsPerBlock})){yielded=true;lastDecodePath='webcodecs';yield b;}
+      if(yielded)return;
+    }catch(e){if(yielded)throw new Error('DECODE');why.push('wc:'+(e.message||e));}
   }
-  if(aac){
-    const per=Math.max(50,Math.round(secsPerBlock*aac.sr/1024)),PRE=2,n=aac.frames.length;
+  // 2) AAC 分段解碼
+  if(info&&info.adts){
+    const frames=toADTS(info),per=Math.max(50,Math.round(secsPerBlock*info.sr/1024)),PRE=2,n=frames.length;
     let ok=true;
     for(let i=0;i<n;i+=per){
       const a=Math.max(0,i-PRE),pre=i-a;
       let buf;
-      try{buf=await decodeAt(await new Blob(aac.frames.slice(a,i+per)).arrayBuffer(),rate);}
-      catch(e){if(i===0){ok=false;break;}throw new Error('DECODE');}
-      const drop=Math.min(buf.length,Math.round(pre*1024*rate/aac.sr));
+      try{buf=await decodeAt(await new Blob(frames.slice(a,i+per)).arrayBuffer(),rate);}
+      catch(e){if(i===0){ok=false;why.push('adts');break;}throw new Error('DECODE');}
+      const drop=Math.min(buf.length,Math.round(pre*1024*rate/info.sr));
       const L=buf.getChannelData(0).subarray(drop);
       const R=buf.numberOfChannels>1?buf.getChannelData(1).subarray(drop):L;
+      lastDecodePath='adts';
       yield {L,R,done:Math.min(1,(i+per)/n)};
     }
     if(ok)return;
   }
+  // 3) 整個檔案解碼（小檔案才可能成功）
+  if(file.size>400*1024*1024){const e=new Error('DECODE');e.detail=why.join(' | ');throw e;}
   let buf;
-  try{buf=await decodeAt(await file.arrayBuffer(),rate);}catch(e){throw new Error('DECODE');}
+  try{buf=await decodeAt(await file.arrayBuffer(),rate);}catch(e){const er=new Error('DECODE');er.detail=why.concat('full').join(' | ');throw er;}
+  lastDecodePath='full';
   const s0=Math.max(0,Math.floor(start*rate)),s1=Math.min(buf.length,end==null?buf.length:Math.floor(end*rate));
   if(s1<=s0)throw new Error('EMPTY');
   const L0=buf.getChannelData(0),R0=buf.numberOfChannels>1?buf.getChannelData(1):L0,step=secsPerBlock*rate;
@@ -388,7 +476,7 @@ $('go').onclick=async()=>{
     setStatus((note?note+' ':'')+'完成，花了 '+((performance.now()-t0)/1000).toFixed(1)+' 秒。','ok');
   }catch(e){
     setBar(0);
-    setStatus(e.message==='LIB'?'轉檔元件沒有載入，請確認網路後重新整理頁面。':(ERR[e.message]||('轉檔失敗：'+(e.message||e)+'。影片太大時手機記憶體可能不夠，可以縮短範圍或改用 AAC。')),'err');
+    setStatus(e.message==='LIB'?'轉檔元件沒有載入，請確認網路後重新整理頁面。':(ERR[e.message]||('轉檔失敗：'+(e.message||e)+'。影片太大時手機記憶體可能不夠，可以縮短範圍或改用 AAC。'))+(e.detail?'（代碼：'+e.detail+'）':''),'err');
   }finally{busy=false;$('go').disabled=!file;updTrim();if(lock)try{lock.release();}catch(e){}}
 };
 $('share').onclick=async()=>{
@@ -484,8 +572,8 @@ $('tgo').onclick=async()=>{
     if(!lines.length)setTStatus(stopFlag?'已停止，還沒有辨識到文字。':'沒有辨識到說話的聲音。','err');
     else setTStatus((stopFlag?'已停止，保留目前的文字。':'完成！')+'共 '+lines.length+' 段，花了 '+fmtTs(secs)+'。','ok');
   }catch(e){
-    setTStatus(ERR[e.message]&&e.message!=='NOT_AAC'&&e.message!=='NOT_MP4'&&e.message!=='PARSE'?ERR[e.message]:
-      ('逐字稿失敗：'+(e.message||e)+'。請確認網路（第一次要下載模型），或縮短範圍再試。'),'err');
+    setTStatus((ERR[e.message]&&e.message!=='NOT_AAC'&&e.message!=='NOT_MP4'&&e.message!=='PARSE'?ERR[e.message]:
+      ('逐字稿失敗：'+(e.message||e)+'。請確認網路（第一次要下載模型），或縮短範圍再試。'))+(e.detail?'（代碼：'+e.detail+'）':''),'err');
   }finally{
     tbusy=false;$('tgo').disabled=!file;$('tstop').hidden=true;$('lang').disabled=$('model').disabled=false;updTrim();
     if(lock)try{lock.release();}catch(e){}
