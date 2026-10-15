@@ -101,7 +101,7 @@ footer{color:var(--sub);font-size:15px;line-height:1.7}
       <g fill="#f4f2ee"><rect x="300" y="196" width="28" height="120" rx="14"/><rect x="344" y="146" width="28" height="220" rx="14"/><rect x="388" y="216" width="28" height="80" rx="14"/></g>
     </svg>
     <div class="htext">
-      <h1>影片轉音檔 <span class="ver" id="ver">v1.1.1</span></h1>
+      <h1>影片轉音檔 <span class="ver" id="ver">v1.1.2</span></h1>
       <p class="tag">支援 MP4、MOV、WebM、MKV 等手機常見格式。</p>
     </div>
   </header>
@@ -189,7 +189,7 @@ footer{color:var(--sub);font-size:15px;line-height:1.7}
 <script src="https://cdnjs.cloudflare.com/ajax/libs/lamejs/1.2.1/lame.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/opencc-js@1.0.5/dist/umd/cn2t.js"></script>
 <script>
-const VERSION='v1.1.1';
+const VERSION='v1.1.2';
 const TF_URL='https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.7.5';
 const $=id=>document.getElementById(id);
 $('ver').textContent=VERSION;
@@ -500,6 +500,7 @@ $('copy').onclick=async()=>{
   const b=$('copy');b.textContent='已複製 ✓';setTimeout(()=>b.textContent='複製全部',1600);
 };
 updTrim();
+if('serviceWorker' in navigator)window.addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
 </script>
 </body>
 </html>
