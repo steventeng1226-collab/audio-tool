@@ -110,7 +110,7 @@ footer{color:var(--sub);font-size:12px;line-height:1.6}
       <g fill="#f4f2ee"><rect x="300" y="196" width="28" height="120" rx="14"/><rect x="344" y="146" width="28" height="220" rx="14"/><rect x="388" y="216" width="28" height="80" rx="14"/></g>
     </svg>
     <div class="htext">
-      <h1>影片轉音檔 <span class="ver" id="ver">v1.2.1</span></h1>
+      <h1>影片轉音檔 <span class="ver" id="ver">v1.2.2</span></h1>
       <p class="tag">支援 MP4、MOV、WebM、MKV 等手機常見格式。</p>
     </div>
   </header>
@@ -185,6 +185,7 @@ footer{color:var(--sub);font-size:12px;line-height:1.6}
       <button class="big" id="tresume" hidden>接著做</button>
     </div>
     <div class="bar" aria-hidden="true"><i id="tbar"></i></div>
+    <div class="hint" id="mstat"></div>
     <div class="status" id="tstatus" role="status">請先選擇影片。</div>
     <div id="tresult" hidden style="display:flex;flex-direction:column;gap:10px">
       <label class="check"><input type="checkbox" id="showTime" checked>顯示時間</label>
@@ -215,7 +216,7 @@ footer{color:var(--sub);font-size:12px;line-height:1.6}
 <script src="https://cdnjs.cloudflare.com/ajax/libs/lamejs/1.2.1/lame.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/opencc-js@1.0.5/dist/umd/cn2t.js"></script>
 <script>
-const VERSION='v1.2.1';
+const VERSION='v1.2.2';
 const TF_URL='https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.7.5';
 const $=id=>document.getElementById(id);
 $('ver').textContent=VERSION;
@@ -630,20 +631,24 @@ async function loadASR(model,forceWasm){
       if(pct>=100)setTStatus('模型準備中，馬上開始辨識…');}
   };
   asr=null;
-  if(!forceWasm&&navigator.gpu){
+  // 固定用同一個版本的模型（記住上次成功的設定），避免換版本又重新下載
+  const CFG_KEY='audiotool_asrcfg_'+model;
+  let saved=null;try{saved=JSON.parse(localStorage.getItem(CFG_KEY)||'null');}catch(e){}
+  const remember=c=>{try{localStorage.setItem(CFG_KEY,JSON.stringify(c));}catch(e){}};
+  if(!forceWasm&&navigator.gpu&&!(saved&&saved.device==='wasm')){
     try{
       const ad=await navigator.gpu.requestAdapter();
       if(ad){
-        const enc=ad.features&&ad.features.has('shader-f16')?'fp16':'fp32';
+        const enc=(saved&&saved.enc)||(ad.features&&ad.features.has('shader-f16')?'fp16':'fp32');
         asr=await T.pipeline('automatic-speech-recognition',model,{device:'webgpu',dtype:{encoder_model:enc,decoder_model_merged:'q4'},progress_callback:cb});
-        asrDevice='webgpu';
+        asrDevice='webgpu';remember({device:'webgpu',enc});
       }
     }catch(e){asr=null;}
   }
   if(!asr){
     try{T.env.backends.onnx.wasm.proxy=true;}catch(e){}
     asr=await T.pipeline('automatic-speech-recognition',model,{device:'wasm',dtype:'q8',progress_callback:cb});
-    asrDevice='wasm';
+    asrDevice='wasm';if(!forceWasm)remember({device:'wasm'});
   }
   asrKey=key;return asr;
 }
@@ -830,7 +835,7 @@ async function startTranscribe(resume){
       if(asrDevice==='webgpu'&&!lines.length&&!ERR[e.message]){setTStatus('GPU 加速失敗，改用一般模式重試…');await runASR(model,lang,true);}
       else throw e;
     }
-    setTBar(1);tDone=!stopFlag;if(tDone)asrPos=0;saveLast();
+    modelStatus();setTBar(1);tDone=!stopFlag;if(tDone)asrPos=0;saveLast();
     const secs=Math.round((performance.now()-t0)/1000);
     if(!lines.length)setTStatus(stopFlag?'已停止，還沒有辨識到文字。':'沒有辨識到說話的聲音。如果錄音裡確實有人說話，可以把語言改成「自動判斷」再試一次。','err');
     else setTStatus((stopFlag?'已停止，保留目前的文字（之後可以按「接著做」繼續）。':'完成！')+'共 '+displayLines(lines).length+' 句，花了 '+fmtTs(secs)+'。','ok');
@@ -917,6 +922,18 @@ async function backupToSheet(force){
 $('gsNow').onclick=()=>backupToSheet(true);
 updTrim();
 restoreLast();
+/* 請 Chrome 把模型永久保存，不要因為空間管理自動清掉 */
+async function modelStatus(){
+  let persisted=false,mb=0,has={};
+  try{persisted=await navigator.storage.persisted();if(!persisted)persisted=await navigator.storage.persist();}catch(e){}
+  try{const c=await caches.open('transformers-cache');for(const r of await c.keys()){
+      const m=r.url.match(/onnx-community\/(whisper-[a-z]+)\//);if(m&&/\.onnx/.test(r.url))has[m[1]]=1;}}catch(e){}
+  try{const est=await navigator.storage.estimate();mb=Math.round((est.usage||0)/1048576);}catch(e){}
+  const names={'whisper-small':'準確','whisper-base':'快速'};
+  const list=Object.keys(has).map(k=>names[k]||k);
+  $('mstat').textContent='模型：'+(list.length?'已存在手機（'+list.join('、')+'）':'尚未下載')+'　已用空間 '+mb+' MB　'+(persisted?'永久保存 ✓':'未設永久保存（Chrome 可能在空間不足時清掉）');
+}
+modelStatus();
 if('serviceWorker' in navigator)window.addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
 </script>
 </body>
