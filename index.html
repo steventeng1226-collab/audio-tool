@@ -110,7 +110,7 @@ footer{color:var(--sub);font-size:12px;line-height:1.6}
       <g fill="#f4f2ee"><rect x="300" y="196" width="28" height="120" rx="14"/><rect x="344" y="146" width="28" height="220" rx="14"/><rect x="388" y="216" width="28" height="80" rx="14"/></g>
     </svg>
     <div class="htext">
-      <h1>影片轉音檔 <span class="ver" id="ver">v1.2.2</span></h1>
+      <h1>影片轉音檔 <span class="ver" id="ver">v1.2.3</span></h1>
       <p class="tag">支援 MP4、MOV、WebM、MKV 等手機常見格式。</p>
     </div>
   </header>
@@ -194,15 +194,16 @@ footer{color:var(--sub);font-size:12px;line-height:1.6}
         <input id="tname" type="text" autocomplete="off" spellcheck="false"></div>
       <div class="row3">
         <button class="primary" id="copy">複製全部</button>
-        <button id="tshare">存到雲端</button>
+        <button id="tsheet">備份到試算表</button>
         <a class="btn" id="tdl" href="#">下載 .txt</a>
       </div>
+      <button class="small" id="tshare" style="align-self:flex-start">分享到 LINE／微信…</button>
     </div>
   </section>
 
   <details class="step" id="gsBox">
     <summary class="gs-sum">Google 試算表備份<span id="gsState" class="gs-state">未設定</span></summary>
-    <p class="hint">按「下載 .txt」或「存到雲端」時，逐字稿會同時備份到你的 Google 試算表。同一個檔名再存一次會更新原本那一列，不會重複。</p>
+    <p class="hint">按「備份到試算表」會存進你的 Google 試算表；按「下載 .txt」時也會順便備份。同一個檔名再存一次會更新原本那一列，不會重複。</p>
     <div class="field"><label for="gsUrl">試算表程式網址（Apps Script 網頁應用程式）</label>
       <input id="gsUrl" type="url" placeholder="https://script.google.com/macros/s/…/exec" autocomplete="off" spellcheck="false"></div>
     <div class="row3"><button id="gsSave" class="primary">儲存</button><button id="gsTest">測試連線</button><button id="gsNow">立即備份</button></div>
@@ -216,7 +217,7 @@ footer{color:var(--sub);font-size:12px;line-height:1.6}
 <script src="https://cdnjs.cloudflare.com/ajax/libs/lamejs/1.2.1/lame.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/opencc-js@1.0.5/dist/umd/cn2t.js"></script>
 <script>
-const VERSION='v1.2.2';
+const VERSION='v1.2.3';
 const TF_URL='https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.7.5';
 const $=id=>document.getElementById(id);
 $('ver').textContent=VERSION;
@@ -742,10 +743,10 @@ $('tshare').onclick=async()=>{
   const f=new File(['\ufeff'+txt],tFileName(),{type:'text/plain'});
   try{
     if(!(navigator.canShare&&navigator.canShare({files:[f]})))throw new Error('NOSHARE');
-    backupToSheet();
     await navigator.share({files:[f],title:f.name});
-  }catch(e){if(e.name!=='AbortError')setTStatus('這支手機無法用分享存檔，請改用「下載 .txt」。','err');}
+  }catch(e){if(e.name!=='AbortError')setTStatus('這支手機無法分享檔案，請改用「下載 .txt」。','err');}
 };
+$('tsheet').onclick=()=>backupToSheet(true);
 
 // Whisper 在沒有人聲時常會「幻聽」出這類字，過濾掉
 function isHallucination(t){
@@ -899,7 +900,7 @@ let lastBackupKey='';
 async function backupToSheet(force){
   const u=gsGet();const txt=$('ttext').value;
   if(!txt)return;
-  if(!u){if(force)setGs('請先設定試算表網址。','err');else setTStatus('尚未設定 Google 試算表備份（在頁面最下方設定）。');return;}
+  if(!u){if(force){setGs('請先設定試算表網址。','err');setTStatus('還沒設定 Google 試算表（在頁面最下方設定）。','err');}else setTStatus('尚未設定 Google 試算表備份（在頁面最下方設定）。');return;}
   const name=tFileName().replace(/\.txt$/,'');
   const key=name+'|'+txt.length;
   if(!force&&key===lastBackupKey)return;
@@ -908,6 +909,7 @@ async function backupToSheet(force){
   const data={name,videoDate:m.stamp,source:m.source,duration:m.duration,
     mode:($('lang').selectedOptions[0]||{}).text+'／'+($('model').selectedOptions[0]||{}).text,text:txt};
   const msg=t=>{setTStatus(t,'ok');setGs(t,'ok');};
+  if(force)setTStatus('備份中…');
   try{
     const r=await fetch(u,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify(data)});
     const j=await r.json();
