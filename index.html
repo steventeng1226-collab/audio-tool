@@ -110,7 +110,7 @@ footer{color:var(--sub);font-size:12px;line-height:1.6}
       <g fill="#f4f2ee"><rect x="300" y="196" width="28" height="120" rx="14"/><rect x="344" y="146" width="28" height="220" rx="14"/><rect x="388" y="216" width="28" height="80" rx="14"/></g>
     </svg>
     <div class="htext">
-      <h1>影片轉音檔 <span class="ver" id="ver">v1.1.12</span></h1>
+      <h1>影片轉音檔 <span class="ver" id="ver">v1.2.0</span></h1>
       <p class="tag">支援 MP4、MOV、WebM、MKV 等手機常見格式。</p>
     </div>
   </header>
@@ -135,6 +135,8 @@ footer{color:var(--sub);font-size:12px;line-height:1.6}
       <div class="trow"><span class="lab">結束</span><span class="time" id="tEnd">--:--.-</span><button id="setEnd" disabled>設為目前</button></div>
       <div class="row"><span class="span" id="tSpan">長度：整段</span><button class="small" id="clearTrim" disabled>清除範圍</button></div>
     </div>
+    <label class="check"><input type="checkbox" id="enh" checked>加強人聲（去背景雜音、小聲自動放大）</label>
+    <p class="hint">用在逐字稿和 MP3。選「原音質 AAC」時不處理，保持原音。</p>
   </section>
 
   <section class="step" aria-labelledby="s3">
@@ -210,7 +212,7 @@ footer{color:var(--sub);font-size:12px;line-height:1.6}
 <script src="https://cdnjs.cloudflare.com/ajax/libs/lamejs/1.2.1/lame.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/opencc-js@1.0.5/dist/umd/cn2t.js"></script>
 <script>
-const VERSION='v1.1.12';
+const VERSION='v1.2.0';
 const TF_URL='https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.7.5';
 const $=id=>document.getElementById(id);
 $('ver').textContent=VERSION;
@@ -446,13 +448,90 @@ async function* pcmBlocks(file,{start=0,end=null,rate,secsPerBlock=240,onExtract
   for(let i=s0;i<s1;i+=step){const j=Math.min(s1,i+step);yield {L:L0.subarray(i,j),R:R0.subarray(i,j),done:(j-s0)/(s1-s0)};}
 }
 
+/* ---------- 加強人聲：去低頻嗡嗡聲＋頻譜降噪＋音量放大 ---------- */
+function makeFFT(n){
+  const lv=Math.log2(n)|0,rev=new Uint32Array(n),cos=new Float64Array(n/2),sin=new Float64Array(n/2);
+  for(let i=0;i<n;i++){let r=0,x=i;for(let j=0;j<lv;j++){r=(r<<1)|(x&1);x>>=1;}rev[i]=r;}
+  for(let i=0;i<n/2;i++){cos[i]=Math.cos(2*Math.PI*i/n);sin[i]=-Math.sin(2*Math.PI*i/n);}
+  return function(re,im,inv){
+    for(let i=0;i<n;i++){const j=rev[i];if(j>i){let t=re[i];re[i]=re[j];re[j]=t;t=im[i];im[i]=im[j];im[j]=t;}}
+    for(let size=2;size<=n;size<<=1){
+      const half=size>>1,step=n/size;
+      for(let i=0;i<n;i+=size){
+        for(let j=0,k=0;j<half;j++,k+=step){
+          const wr=cos[k],wi=inv?-sin[k]:sin[k];
+          const a=i+j,b=a+half;
+          const tr=re[b]*wr-im[b]*wi,ti=re[b]*wi+im[b]*wr;
+          re[b]=re[a]-tr;im[b]=im[a]-ti;re[a]+=tr;im[a]+=ti;
+        }
+      }
+    }
+    if(inv){for(let i=0;i<n;i++){re[i]/=n;im[i]/=n;}}
+  };
+}
+const _fftCache={};
+function enhanceVoice(x,sr,opt){
+  opt=opt||{};
+  const len=x.length;if(len<64)return x;
+  // 1) 高通濾波約 90 Hz：去掉冷氣、馬達、桌面震動的低頻嗡嗡聲
+  const y=new Float32Array(len);
+  const rc=1/(2*Math.PI*90),dt=1/sr,a=rc/(rc+dt);
+  let px=x[0],py=0;
+  for(let i=0;i<len;i++){const v=x[i];py=a*(py+v-px);px=v;y[i]=py;}
+  if(opt.denoise===false)return normalizeGain(y,opt.maxGain||6);
+  // 2) 頻譜降噪：估計背景噪音的頻譜，把只有噪音的部分壓低
+  const N=sr>=32000?2048:512,H=N/2,nb=N/2+1;
+  const fft=_fftCache[N]||(_fftCache[N]=makeFFT(N));
+  const win=new Float32Array(N);for(let i=0;i<N;i++)win[i]=Math.sqrt(0.5-0.5*Math.cos(2*Math.PI*i/N));
+  const frames=Math.max(1,Math.ceil((len+N)/H));
+  const pad=new Float32Array(frames*H+N);pad.set(y,H);
+  const mags=new Float32Array(frames*nb);
+  const re=new Float64Array(N),im=new Float64Array(N);
+  for(let f=0;f<frames;f++){
+    const o=f*H;for(let i=0;i<N;i++){re[i]=pad[o+i]*win[i];im[i]=0;}
+    fft(re,im,false);
+    for(let k=0;k<nb;k++)mags[f*nb+k]=Math.hypot(re[k],im[k]);
+  }
+  // 每個頻率取能量最低的 15% 當作噪音水準
+  const noise=new Float32Array(nb),col=new Float32Array(frames);
+  const q=Math.min(frames-1,Math.floor(frames*0.15));
+  for(let k=0;k<nb;k++){for(let f=0;f<frames;f++)col[f]=mags[f*nb+k];col.sort();noise[k]=col[q];}
+  const over=opt.strength||2.0,floor=opt.floor||0.15;
+  const out=new Float32Array(pad.length);
+  const prevG=new Float32Array(nb).fill(1);
+  for(let f=0;f<frames;f++){
+    const o=f*H;for(let i=0;i<N;i++){re[i]=pad[o+i]*win[i];im[i]=0;}
+    fft(re,im,false);
+    for(let k=0;k<nb;k++){
+      const m=mags[f*nb+k]+1e-12,nn=noise[k]*over;
+      let g=1-(nn*nn)/(m*m);if(g<floor)g=floor;
+      g=0.6*g+0.4*prevG[k];prevG[k]=g; // 平滑，避免「水聲」
+      re[k]*=g;im[k]*=g;
+      if(k>0&&k<N/2){re[N-k]=re[k];im[N-k]=-im[k];}
+    }
+    fft(re,im,true);
+    for(let i=0;i<N;i++)out[o+i]+=re[i]*win[i];
+  }
+  return normalizeGain(out.subarray(H,H+len),opt.maxGain||6);
+}
+// 3) 音量放大：太小聲就放大（不破音）
+function normalizeGain(y,maxGain){
+  let pk=0,e=0;for(let i=0;i<y.length;i++){const v=y[i];e+=v*v;const a=v<0?-v:v;if(a>pk)pk=a;}
+  const rms=Math.sqrt(e/y.length)||1e-9;
+  let g=Math.min(maxGain,0.1/rms,0.95/(pk||1));if(g<1)g=1;
+  if(g>1.02){const z=new Float32Array(y.length);for(let i=0;i<y.length;i++)z[i]=y[i]*g;return z;}
+  return y instanceof Float32Array&&y.byteOffset===0&&y.length===y.buffer.byteLength/4?y:Float32Array.from(y);
+}
+
 /* ---------- MP3 ---------- */
 const tick=()=>new Promise(r=>setTimeout(r,0));
 const toI=v=>v<-1?-32768:v>1?32767:(v<0?v*32768:v*32767)|0;
 async function toMP3(file,{start=0,end=null,mono=false,kbps=128,onProgress=()=>{}}){
   const chans=mono?1:2,enc=new lamejs.Mp3Encoder(chans,44100,kbps),B=1152,parts=[];
   setStatus('讀取聲音中…');
-  for await(const b of pcmBlocks(file,{start,end,rate:44100,onExtract:p=>onProgress(p*.1)})){
+  for await(let b of pcmBlocks(file,{start,end,rate:44100,onExtract:p=>onProgress(p*.1)})){
+    if($('enh').checked){setStatus('加強人聲處理中…');await tick();
+      const L=enhanceVoice(b.L,44100,{maxGain:4});b={...b,L,R:b.R===b.L?L:enhanceVoice(b.R,44100,{maxGain:4})};}
     setStatus('轉成 MP3 中…');
     const len=b.L.length,a=new Int16Array(len),c=chans===2?new Int16Array(len):null;
     for(let k=0;k<len;k++){if(c){a[k]=toI(b.L[k]);c[k]=toI(b.R[k]);}else a[k]=toI((b.L[k]+b.R[k])*.5);}
@@ -588,9 +667,34 @@ function renderT(){
   if(!tnameEdited)$('tname').value=suggestTName();
   $('tdl').href=txtURL;$('tdl').setAttribute('download',tFileName());
   $('tdl').textContent='下載 .txt';
+  saveLast();
+}
+/* ---------- 自動保存上一份逐字稿（跳出 App 也不會不見） ---------- */
+const LAST_KEY='audiotool_last_transcript';
+let restored=null,tDone=false;
+function curMeta(){
+  if(file)return {source:file.name,stamp:fileStamp(file),duration:fmtTs(Math.max(0,(tE==null?dur:tE)-tS))};
+  return restored?{source:restored.source,stamp:restored.stamp,duration:restored.duration}:{source:'',stamp:fileStamp(null),duration:''};
+}
+function saveLast(){
+  if(!lines.length)return;
+  try{localStorage.setItem(LAST_KEY,JSON.stringify({lines,name:$('tname').value,edited:tnameEdited,done:tDone,
+    savedAt:Date.now(),...curMeta()}));}catch(e){}
+}
+function restoreLast(){
+  let d=null;try{d=JSON.parse(localStorage.getItem(LAST_KEY)||'null');}catch(e){}
+  if(!d||!d.lines||!d.lines.length)return;
+  restored=d;lines=d.lines;tnameEdited=true;$('tname').value=d.name||'';
+  renderT();$('tresult').hidden=false;
+  const when=new Date(d.savedAt||Date.now()),z=n=>String(n).padStart(2,'0');
+  const last=d.lines[d.lines.length-1];
+  setTStatus('已還原上次的逐字稿（'+(d.source||'')+'，'+(when.getMonth()+1)+'/'+when.getDate()+' '+z(when.getHours())+':'+z(when.getMinutes())+'）'+
+    (d.done?'':'。上次辨識沒做完，只到 '+fmtTs(last.t)+'，需要的話請重選影片、從這裡設開始時間再跑一次。'),'ok');
 }
 $('showTime').addEventListener('change',renderT);
-$('tname').addEventListener('input',()=>{tnameEdited=true;$('tdl').setAttribute('download',tFileName());});
+try{const v=localStorage.getItem('audiotool_enh');if(v!==null)$('enh').checked=v==='1';}catch(e){}
+$('enh').addEventListener('change',()=>{try{localStorage.setItem('audiotool_enh',$('enh').checked?'1':'0');}catch(e){}});
+$('tname').addEventListener('input',()=>{tnameEdited=true;saveLast();$('tdl').setAttribute('download',tFileName());});
 $('tdl').addEventListener('click',()=>{setTimeout(()=>{$('tdl').textContent='已下載 ✓';},300);backupToSheet();});
 $('tshare').onclick=async()=>{
   const txt=$('ttext').value;if(!txt)return;
@@ -607,41 +711,71 @@ function isHallucination(t){
   const x=t.replace(/[\s。，、.!！?？…]+/g,'');
   return /^[\(（\[【]?(字幕|中文字幕|字幕由.*|字幕志願者.*|請不吝點贊.*|請訂閱.*|訂閱.*|謝謝觀看|感謝觀看|謝謝收看|謝謝大家|謝謝|明鏡與點點欄目|Amaraorg.*|Thankyouforwatching|Thanksforwatching|Subscribe.*)[\)）\]】]?$/i.test(x);
 }
+// 重複字串（例如「便便便便…」）壓縮成最多 3 次
+function collapseRepeats(t){return t.replace(/(.{1,6}?)\1{3,}/g,'$1$1$1');}
+function isRepetitive(t){const c=collapseRepeats(t);return t.length>20&&c.length<t.length*0.6;}
 async function runASR(model,lang,forceWasm){
   const pipe=await loadASR(model,forceWasm);
-  const RATE=16000,SEG=30*RATE,total=Math.max(1,(tE==null?dur:tE)-tS);
-  let buf=new Float32Array(0),t=tS;
-  const opts={task:'transcribe'};if(lang)opts.language=lang;
-  const doSeg=async seg=>{
-    let e=0,pk=0;for(let i=0;i<seg.length;i++){const v=seg[i];e+=v*v;const a=v<0?-v:v;if(a>pk)pk=a;}
-    const rms=Math.sqrt(e/seg.length);
+  const RATE=16000,WIN=30*RATE,total=Math.max(1,(tE==null?dur:tE)-tS);
+  const enh=$('enh').checked;
+  const opts={task:'transcribe',return_timestamps:true};if(lang)opts.language=lang;
+  const it=pcmBlocks(file,{start:tS,end:rangeEnd(),rate:RATE,secsPerBlock:120,onExtract:p=>setTBar(p*.05)})[Symbol.asyncIterator]();
+  let buf=new Float32Array(0),base=tS,cur=0,ended=false;
+  const fill=async()=>{
+    while(!ended&&buf.length-cur<WIN){
+      const r=await it.next();
+      if(r.done){ended=true;break;}
+      const b=r.value,n=b.L.length;
+      let mono=new Float32Array(n);
+      if(b.R===b.L)mono.set(b.L);else for(let k=0;k<n;k++)mono[k]=(b.L[k]+b.R[k])*.5;
+      if(enh){setTStatus('加強人聲處理中…');await tick();mono=enhanceVoice(mono,RATE,{maxGain:1});}
+      const m=new Float32Array(buf.length-cur+n);m.set(buf.subarray(cur));m.set(mono,buf.length-cur);
+      base+=cur/RATE;cur=0;buf=m;
+    }
+  };
+  const run=async(x,extra)=>{const r=await pipe(x,extra?{...opts,...extra}:opts);return r||{};};
+  setTStatus('讀取聲音中…');
+  while(!stopFlag){
+    await fill();
+    const avail=buf.length-cur;
+    if(avail<RATE*0.5)break;
+    const n=Math.min(WIN,avail),isLast=ended&&cur+n>=buf.length;
+    const seg=buf.subarray(cur,cur+n),t0=base+cur/RATE;
+    let e=0,pk=0;for(let i=0;i<n;i++){const v=seg[i];e+=v*v;const a=v<0?-v:v;if(a>pk)pk=a;}
+    const rms=Math.sqrt(e/n);
+    let adv=n;
     if(rms>0.002){
-      // 錄音太小聲時自動放大（最多 20 倍、不破音）
       let g=Math.min(20,0.08/rms,0.95/(pk||1));if(g<1)g=1;
       const x=g>1.05?seg.map(v=>v*g):seg;
-      const r=await pipe(x,opts);
-      let text=(r&&r.text||'').trim();
-      if(text){text=toTW(text);if(!isHallucination(text)){lines.push({t,text});renderT();$('tresult').hidden=false;}}
+      let r=await run(x);
+      if(isRepetitive(r.text||'')){const r2=await run(x,{repetition_penalty:1.3});if(!isRepetitive(r2.text||'')||(r2.text||'').length<(r.text||'').length)r=r2;}
+      let ch=(r.chunks&&r.chunks.length)?r.chunks.filter(c=>(c.text||'').trim()):[{timestamp:[0,null],text:r.text||''}];
+      // 最後一句通常被 30 秒切斷：先不收，下一段從這句開頭重聽
+      if(!isLast&&ch.length>1){
+        const lc=ch[ch.length-1],st=lc.timestamp&&lc.timestamp[0];
+        if(st!=null&&st>5&&st<29){ch=ch.slice(0,-1);adv=Math.round(st*RATE);}
+      }
+      for(const c of ch){
+        let text=collapseRepeats(toTW((c.text||'').trim()));
+        if(!text||isHallucination(text))continue;
+        const ts=(c.timestamp&&c.timestamp[0]!=null)?c.timestamp[0]:0;
+        lines.push({t:t0+ts,text});
+      }
+      if(lines.length){renderT();$('tresult').hidden=false;}
     }
-    t+=seg.length/RATE;
-    setTBar(.05+.95*Math.min(1,(t-tS)/total));
-    setTStatus('辨識中… '+fmtTs(t-tS)+' / '+fmtTs(total)+(asrDevice==='webgpu'?'（GPU 加速）':''));
-  };
-  setTStatus('讀取聲音中…');
-  for await(const b of pcmBlocks(file,{start:tS,end:rangeEnd(),rate:RATE,secsPerBlock:120,onExtract:p=>setTBar(p*.05)})){
-    const n=b.L.length,m=new Float32Array(buf.length+n);m.set(buf);
-    if(b.R===b.L)m.set(b.L,buf.length);else for(let k=0;k<n;k++)m[buf.length+k]=(b.L[k]+b.R[k])*.5;
-    buf=m;
-    while(buf.length>=SEG){if(stopFlag)return;await doSeg(buf.subarray(0,SEG));buf=buf.slice(SEG);}
+    cur+=adv;
+    const done=base+cur/RATE-tS;
+    setTBar(.05+.95*Math.min(1,done/total));
+    setTStatus('辨識中… '+fmtTs(done)+' / '+fmtTs(total)+(asrDevice==='webgpu'?'（GPU 加速）':''));
+    if(isLast)break;
   }
-  if(!stopFlag&&buf.length>RATE*.5)await doSeg(buf);
 }
 
 $('tgo').onclick=async()=>{
   if(!file||tbusy)return;
   tbusy=true;stopFlag=false;$('tgo').disabled=true;$('tstop').hidden=false;$('tstop').disabled=false;
   $('lang').disabled=$('model').disabled=true;updTrim();
-  lines=[];tnameEdited=false;renderT();$('tresult').hidden=true;setTBar(0);
+  lines=[];tnameEdited=false;tDone=false;restored=null;renderT();$('tresult').hidden=true;setTBar(0);
   const lock=await wake();const t0=performance.now();
   const model=$('model').value,lang=$('lang').value;
   try{
@@ -650,7 +784,7 @@ $('tgo').onclick=async()=>{
       if(asrDevice==='webgpu'&&!lines.length&&!ERR[e.message]){setTStatus('GPU 加速失敗，改用一般模式重試…');await runASR(model,lang,true);}
       else throw e;
     }
-    setTBar(1);
+    setTBar(1);tDone=!stopFlag;saveLast();
     const secs=Math.round((performance.now()-t0)/1000);
     if(!lines.length)setTStatus(stopFlag?'已停止，還沒有辨識到文字。':'沒有辨識到說話的聲音。如果錄音裡確實有人說話，可以把語言改成「自動判斷」再試一次。','err');
     else setTStatus((stopFlag?'已停止，保留目前的文字。':'完成！')+'共 '+lines.length+' 段，花了 '+fmtTs(secs)+'。','ok');
@@ -698,7 +832,8 @@ async function backupToSheet(force){
   const key=name+'|'+txt.length;
   if(!force&&key===lastBackupKey)return;
   const len=Math.max(0,(tE==null?dur:tE)-tS);
-  const data={name,videoDate:fileStamp(file),source:file?file.name:'',duration:fmtTs(len),
+  const m=curMeta();
+  const data={name,videoDate:m.stamp,source:m.source,duration:m.duration,
     mode:($('lang').selectedOptions[0]||{}).text+'／'+($('model').selectedOptions[0]||{}).text,text:txt};
   const msg=t=>{setTStatus(t,'ok');setGs(t,'ok');};
   try{
@@ -714,6 +849,7 @@ async function backupToSheet(force){
 }
 $('gsNow').onclick=()=>backupToSheet(true);
 updTrim();
+restoreLast();
 if('serviceWorker' in navigator)window.addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
 </script>
 </body>
