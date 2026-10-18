@@ -102,7 +102,7 @@ footer{color:var(--sub);font-size:12px;line-height:1.6}
       <g fill="#f4f2ee"><rect x="300" y="196" width="28" height="120" rx="14"/><rect x="344" y="146" width="28" height="220" rx="14"/><rect x="388" y="216" width="28" height="80" rx="14"/></g>
     </svg>
     <div class="htext">
-      <h1>影片轉音檔 <span class="ver" id="ver">v1.1.6</span></h1>
+      <h1>影片轉音檔 <span class="ver" id="ver">v1.1.7</span></h1>
       <p class="tag">支援 MP4、MOV、WebM、MKV 等手機常見格式。</p>
     </div>
   </header>
@@ -165,7 +165,7 @@ footer{color:var(--sub);font-size:12px;line-height:1.6}
       <div class="field"><label for="lang">語言</label>
         <select id="lang"><option value="chinese">中文</option><option value="english">English</option><option value="">自動判斷</option></select></div>
       <div class="field"><label for="model">模式</label>
-        <select id="model"><option value="onnx-community/whisper-base">快速</option><option value="onnx-community/whisper-small">準確（較慢）</option></select></div>
+        <select id="model"><option value="onnx-community/whisper-small" selected>準確（較慢）</option><option value="onnx-community/whisper-base">快速</option></select></div>
     </div>
     <div class="row">
       <button class="primary big" id="tgo" disabled>產生逐字稿</button>
@@ -190,7 +190,7 @@ footer{color:var(--sub);font-size:12px;line-height:1.6}
 <script src="https://cdnjs.cloudflare.com/ajax/libs/lamejs/1.2.1/lame.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/opencc-js@1.0.5/dist/umd/cn2t.js"></script>
 <script>
-const VERSION='v1.1.6';
+const VERSION='v1.1.7';
 const TF_URL='https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.7.5';
 const $=id=>document.getElementById(id);
 $('ver').textContent=VERSION;
@@ -239,56 +239,74 @@ $('clearTrim').onclick=()=>{tS=0;tE=null;updTrim();};
 /* ---------- 取出影片裡的音軌（不解碼） ---------- */
 const SR_TABLE=[96000,88200,64000,48000,44100,32000,24000,22050,16000,12000,11025,8000,7350];
 async function isMP4(f){try{const h=new Uint8Array(await f.slice(4,8).arrayBuffer());return String.fromCharCode(...h)==='ftyp';}catch(e){return false;}}
-function extractAudio(file,opts){
-  const {start=0,end=Infinity,onProgress=()=>{}}=opts||{};
+async function readU8(file,a,b){return new Uint8Array(await file.slice(a,b).arrayBuffer());}
+async function scanBoxes(file){
+  const out=[];let pos=0,guard=0;
+  while(pos+8<=file.size&&guard++<5000){
+    const h=await readU8(file,pos,Math.min(pos+16,file.size));
+    let size=((h[0]<<24)>>>0)+(h[1]<<16)+(h[2]<<8)+h[3];
+    const type=String.fromCharCode(h[4],h[5],h[6],h[7]);
+    if(size===1){size=Number((BigInt(h[8])<<56n)|(BigInt(h[9])<<48n)|(BigInt(h[10])<<40n)|(BigInt(h[11])<<32n)|(BigInt(h[12])<<24n)|(BigInt(h[13])<<16n)|(BigInt(h[14])<<8n)|BigInt(h[15]));}
+    else if(size===0)size=file.size-pos;
+    if(size<8||!/^[\x20-\x7e]{4}$/.test(type))break;
+    out.push({type,start:pos,size});pos+=size;
+  }
+  return out;
+}
+function parseMoov(buf){
   return new Promise((resolve,reject)=>{
-    const mp4=MP4Box.createFile();
-    let track=null,info=null,frames=[],times=[],done=false,got=0,total=0,failed=false,t0=null,trackDesc='',allCount=0;
-    const fail=e=>{if(!failed){failed=true;reject(e);}};
-    mp4.onError=()=>fail(new Error('PARSE'));
-    mp4.onReady=inf=>{
-      const ats=(inf.audioTracks||[]).slice().sort((a,b)=>(b.nb_samples||0)-(a.nb_samples||0));track=ats[0]||null;trackDesc=ats.map(a=>a.codec+'/'+a.nb_samples).join(',');
-      if(!track)return fail(new Error('NO_AUDIO'));
-      info={codec:track.codec,sr:(track.audio&&track.audio.sample_rate)||44100,ch:(track.audio&&track.audio.channel_count)||2,asc:null,adts:null};
-      if(/^mp4a/.test(track.codec)){
-        let asc;try{asc=mp4.getTrackById(track.id).mdia.minf.stbl.stsd.entries[0].esds.esd.descs[0].descs[0].data;}catch(e){}
-        if(asc&&asc.length>=2){
-          info.asc=new Uint8Array(asc);
-          let ot=asc[0]>>3;const fi=((asc[0]&7)<<1)|(asc[1]>>7);const ch=(asc[1]>>3)&15;
-          if(ot>4||ot<1)ot=2;
-          info.adts={p:ot-1,fi,ch};
-          if(SR_TABLE[fi])info.sr=SR_TABLE[fi];
-          if(ch)info.ch=ch;
-        }
-      }
-      total=track.nb_samples;
-      mp4.setExtractionOptions(track.id,null,{nbSamples:500});mp4.start();
-    };
-    mp4.onSamples=(id,user,samples)=>{
-      for(const s of samples){
-        if(t0===null)t0=s.cts/s.timescale;const t=s.cts/s.timescale-t0;got++;allCount++;
-        if(t<start||t>=end)continue;
-        frames.push(new Uint8Array(s.data));times.push(t);
-      }
-      mp4.releaseUsedSamples(id,samples[samples.length-1].number);
-      onProgress(total?got/total:0);
-      if(got>=total)done=true;
-    };
-    (async()=>{
-      const CHUNK=4*1024*1024;let pos=0,guard=0;
-      while(!failed&&!done&&pos<file.size&&guard++<100000){
-        const buf=await file.slice(pos,Math.min(pos+CHUNK,file.size)).arrayBuffer();
-        buf.fileStart=pos;const next=mp4.appendBuffer(buf);
-        pos=(typeof next==='number')?next:pos+buf.byteLength;
-      }
-      if(failed)return;
-      mp4.flush();
-      if(!track)return fail(new Error('NOT_MP4'));
-      if(!frames.length){const e=new Error(allCount?'EMPTY':'NO_AUDIO');e.detail='tracks:'+trackDesc+' samples:'+allCount+' range:'+start+'-'+end;return fail(e);}
-      info.frames=frames;info.times=times;
-      resolve(info);
-    })().catch(fail);
+    const mp4=MP4Box.createFile();let info=null;
+    mp4.onError=()=>reject(new Error('PARSE'));
+    mp4.onReady=inf=>{info=inf;};
+    const ab=buf.buffer.slice(buf.byteOffset,buf.byteOffset+buf.byteLength);ab.fileStart=0;
+    mp4.appendBuffer(ab);mp4.flush();
+    if(!info)return reject(new Error('PARSE'));
+    resolve({mp4,info});
   });
+}
+async function extractAudio(file,opts){
+  const {start=0,end=Infinity,onProgress=()=>{}}=opts||{};
+  const boxes=await scanBoxes(file);
+  const moov=boxes.find(b=>b.type==='moov'),ftyp=boxes.find(b=>b.type==='ftyp');
+  if(!moov)throw new Error(boxes.length?'PARSE':'NOT_MP4');
+  if(moov.size>200*1024*1024)throw new Error('PARSE');
+  const parts=[];
+  if(ftyp&&ftyp.size<4096)parts.push(await readU8(file,ftyp.start,ftyp.start+ftyp.size));
+  parts.push(await readU8(file,moov.start,moov.start+moov.size));
+  const tot=parts.reduce((s,p)=>s+p.length,0),buf=new Uint8Array(tot);let o=0;for(const p of parts){buf.set(p,o);o+=p.length;}
+  const {mp4,info:inf}=await parseMoov(buf);
+  const ats=(inf.audioTracks||[]).slice().sort((a,b)=>(b.nb_samples||0)-(a.nb_samples||0));
+  const track=ats[0];
+  if(!track||!track.nb_samples)throw new Error('NO_AUDIO');
+  const trackDesc=ats.map(a=>a.codec+'/'+a.nb_samples).join(',');
+  const info={codec:track.codec,sr:(track.audio&&track.audio.sample_rate)||44100,ch:(track.audio&&track.audio.channel_count)||2,asc:null,adts:null};
+  if(/^mp4a/.test(track.codec)){
+    let asc;try{asc=mp4.getTrackById(track.id).mdia.minf.stbl.stsd.entries[0].esds.esd.descs[0].descs[0].data;}catch(e){}
+    if(asc&&asc.length>=2){
+      info.asc=new Uint8Array(asc);
+      let ot=asc[0]>>3;const fi=((asc[0]&7)<<1)|(asc[1]>>7);const ch=(asc[1]>>3)&15;
+      if(ot>4||ot<1)ot=2;
+      info.adts={p:ot-1,fi,ch};
+      if(SR_TABLE[fi])info.sr=SR_TABLE[fi];
+      if(ch)info.ch=ch;
+    }
+  }
+  const all=mp4.getTrackSamplesInfo(track.id)||[];
+  if(!all.length){const e=new Error('NO_AUDIO');e.detail='tracks:'+trackDesc+' table:0';throw e;}
+  const t0=all[0].cts/all[0].timescale;
+  const sel=[];for(const s of all){const t=s.cts/s.timescale-t0;if(t>=start&&t<end&&s.size>0)sel.push({o:s.offset,n:s.size,t});}
+  if(!sel.length){const e=new Error('EMPTY');e.detail='tracks:'+trackDesc+' range:'+start+'-'+end;throw e;}
+  const frames=new Array(sel.length),times=sel.map(s=>s.t);
+  const MAX=4*1024*1024;let i=0;
+  while(i<sel.length){
+    let j=i,a=sel[i].o,b=a+sel[i].n;
+    while(j+1<sel.length&&sel[j+1].o>=b&&sel[j+1].o-b<65536&&sel[j+1].o+sel[j+1].n-a<=MAX){j++;b=sel[j].o+sel[j].n;}
+    const chunk=await readU8(file,a,b);
+    for(let k=i;k<=j;k++){const s=sel[k];frames[k]=chunk.slice(s.o-a,s.o-a+s.n);}
+    i=j+1;onProgress(i/sel.length);
+  }
+  info.frames=frames;info.times=times;info.trackDesc=trackDesc;
+  return info;
 }
 function toADTS(info){
   const a=info.adts;
