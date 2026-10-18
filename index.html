@@ -110,7 +110,7 @@ footer{color:var(--sub);font-size:12px;line-height:1.6}
       <g fill="#f4f2ee"><rect x="300" y="196" width="28" height="120" rx="14"/><rect x="344" y="146" width="28" height="220" rx="14"/><rect x="388" y="216" width="28" height="80" rx="14"/></g>
     </svg>
     <div class="htext">
-      <h1>影片轉音檔 <span class="ver" id="ver">v1.1.11</span></h1>
+      <h1>影片轉音檔 <span class="ver" id="ver">v1.1.12</span></h1>
       <p class="tag">支援 MP4、MOV、WebM、MKV 等手機常見格式。</p>
     </div>
   </header>
@@ -210,7 +210,7 @@ footer{color:var(--sub);font-size:12px;line-height:1.6}
 <script src="https://cdnjs.cloudflare.com/ajax/libs/lamejs/1.2.1/lame.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/opencc-js@1.0.5/dist/umd/cn2t.js"></script>
 <script>
-const VERSION='v1.1.11';
+const VERSION='v1.1.12';
 const TF_URL='https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.7.5';
 const $=id=>document.getElementById(id);
 $('ver').textContent=VERSION;
@@ -686,7 +686,7 @@ $('gsSave').onclick=()=>{
 $('gsTest').onclick=async()=>{
   const u=$('gsUrl').value.trim()||gsGet();if(!u){setGs('請先貼上網址。','err');return;}
   setGs('連線中…');
-  try{const r=await fetch(u);const j=await r.json();setGs(j&&j.ok?'連線成功，可以備份。':'連得到，但回應不對，請確認貼的是最新部署的網址。',j&&j.ok?'ok':'err');}
+  try{const r=await fetch(u);const j=await r.json();setGs(j&&j.ok?'連線成功，可以備份。'+(j.version?'（試算表程式 '+j.version+'）':''):'連得到，但回應不對，請確認貼的是最新部署的網址。',j&&j.ok?'ok':'err');}
   catch(e){setGs('連不上。請確認部署時「誰可以存取」選了「所有人」，再重新部署。','err');}
 };
 let lastBackupKey='';
