@@ -110,7 +110,7 @@ footer{color:var(--sub);font-size:12px;line-height:1.6}
       <g fill="#f4f2ee"><rect x="300" y="196" width="28" height="120" rx="14"/><rect x="344" y="146" width="28" height="220" rx="14"/><rect x="388" y="216" width="28" height="80" rx="14"/></g>
     </svg>
     <div class="htext">
-      <h1>影片轉音檔 <span class="ver" id="ver">v1.2.0</span></h1>
+      <h1>影片轉音檔 <span class="ver" id="ver">v1.2.1</span></h1>
       <p class="tag">支援 MP4、MOV、WebM、MKV 等手機常見格式。</p>
     </div>
   </header>
@@ -181,6 +181,9 @@ footer{color:var(--sub);font-size:12px;line-height:1.6}
       <button class="primary big" id="tgo" disabled>產生逐字稿</button>
       <button class="big" id="tstop" hidden>停止</button>
     </div>
+    <div class="row">
+      <button class="big" id="tresume" hidden>接著做</button>
+    </div>
     <div class="bar" aria-hidden="true"><i id="tbar"></i></div>
     <div class="status" id="tstatus" role="status">請先選擇影片。</div>
     <div id="tresult" hidden style="display:flex;flex-direction:column;gap:10px">
@@ -212,7 +215,7 @@ footer{color:var(--sub);font-size:12px;line-height:1.6}
 <script src="https://cdnjs.cloudflare.com/ajax/libs/lamejs/1.2.1/lame.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/opencc-js@1.0.5/dist/umd/cn2t.js"></script>
 <script>
-const VERSION='v1.2.0';
+const VERSION='v1.2.1';
 const TF_URL='https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.7.5';
 const $=id=>document.getElementById(id);
 $('ver').textContent=VERSION;
@@ -249,7 +252,10 @@ function onPick(e){
   v.src=URL.createObjectURL(f);v.hidden=false;
   ['setStart','setEnd'].forEach(id=>$(id).disabled=false);
   $('go').disabled=busy;$('tgo').disabled=tbusy;$('result').hidden=true;setBar(0);setTBar(0);
-  setStatus('已選好影片，按「開始擷取」。');setTStatus('按「產生逐字稿」開始。');updTrim();
+  setStatus('已選好影片，按「開始擷取」。');
+  if(canResume(f)){setTStatus('這支影片上次辨識到 '+fmtTs(restored.pos)+'，可以按「接著做」從那裡繼續。','ok');}
+  else setTStatus('按「產生逐字稿」開始。');
+  updTrim();showResume();
 }
 $('file').addEventListener('change',onPick);$('file2').addEventListener('change',onPick);
 $('vid').addEventListener('loadedmetadata',()=>{dur=$('vid').duration||0;
@@ -658,9 +664,30 @@ function suggestTName(){
   return '逐字稿_'+fileStamp(file)+(title?'_'+title:'');
 }
 function tFileName(){return (cleanName($('tname').value)||suggestTName())+'.txt';}
+function normT(s){return s.replace(/[\s，。、,.!！?？…~～]+/g,'');}
+function isBracketOnly(t){return /^[\(（\[【][^\)）\]】]{0,12}[\)）\]】]$/.test(normT(t));}
+function displayLines(raw){
+  // 1) 去掉只有括號的字、連續重複的短句
+  const a=[];
+  for(const l of raw){
+    const t=(l.text||'').trim();if(!t||isBracketOnly(t))continue;
+    const p=a[a.length-1];
+    if(p&&normT(p.text)===normT(t)&&normT(t).length<=6)continue;
+    a.push({t:l.t,text:t,end:l.t});
+  }
+  // 2) 碎句合併成完整句子
+  const out=[];
+  for(const l of a){
+    const g=out[out.length-1],len=normT(l.text).length;
+    if(g&&l.t-g.end<4&&(normT(g.text).length<14||len<=3)&&normT(g.text).length+len<=60){
+      g.text+=(/[，。、,.!！?？]$/.test(g.text)?'':'，')+l.text;g.end=l.t;
+    }else out.push({t:l.t,text:l.text,end:l.t});
+  }
+  return out.map(g=>({t:g.t,text:g.text}));
+}
 function renderT(){
   const show=$('showTime').checked;
-  const txt=lines.map(l=>show?'['+fmtTs(l.t)+'] '+l.text:l.text).join('\n');
+  const txt=displayLines(lines).map(l=>show?'['+fmtTs(l.t)+'] '+l.text:l.text).join('\n');
   $('ttext').value=txt;
   if(txtURL)URL.revokeObjectURL(txtURL);
   txtURL=URL.createObjectURL(new Blob(['﻿'+txt],{type:'text/plain;charset=utf-8'}));
@@ -676,20 +703,29 @@ function curMeta(){
   if(file)return {source:file.name,stamp:fileStamp(file),duration:fmtTs(Math.max(0,(tE==null?dur:tE)-tS))};
   return restored?{source:restored.source,stamp:restored.stamp,duration:restored.duration}:{source:'',stamp:fileStamp(null),duration:''};
 }
+let resumeFrom=null,asrPos=0,asrSig=null,asrRange=null,asrModel='',asrLang='';
 function saveLast(){
-  if(!lines.length)return;
+  if(!lines.length&&!asrPos)return;
   try{localStorage.setItem(LAST_KEY,JSON.stringify({lines,name:$('tname').value,edited:tnameEdited,done:tDone,
-    savedAt:Date.now(),...curMeta()}));}catch(e){}
+    savedAt:Date.now(),pos:asrPos,sig:asrSig,range:asrRange,model:asrModel,lang:asrLang,...curMeta()}));}catch(e){}
+}
+function canResume(f){
+  const d=restored;
+  return !!(d&&!d.done&&d.pos&&d.sig&&f&&d.sig.name===f.name&&d.sig.size===f.size);
+}
+function showResume(){
+  const b=$('tresume');
+  if(canResume(file)&&!tbusy){b.hidden=false;b.textContent='從 '+fmtTs(restored.pos)+' 接著做';}else b.hidden=true;
 }
 function restoreLast(){
   let d=null;try{d=JSON.parse(localStorage.getItem(LAST_KEY)||'null');}catch(e){}
-  if(!d||!d.lines||!d.lines.length)return;
-  restored=d;lines=d.lines;tnameEdited=true;$('tname').value=d.name||'';
+  if(!d||((!d.lines||!d.lines.length)&&!d.pos))return;
+  restored=d;lines=d.lines||[];tnameEdited=true;$('tname').value=d.name||'';
   renderT();$('tresult').hidden=false;
   const when=new Date(d.savedAt||Date.now()),z=n=>String(n).padStart(2,'0');
-  const last=d.lines[d.lines.length-1];
+  const last=lines[lines.length-1];
   setTStatus('已還原上次的逐字稿（'+(d.source||'')+'，'+(when.getMonth()+1)+'/'+when.getDate()+' '+z(when.getHours())+':'+z(when.getMinutes())+'）'+
-    (d.done?'':'。上次辨識沒做完，只到 '+fmtTs(last.t)+'，需要的話請重選影片、從這裡設開始時間再跑一次。'),'ok');
+    (d.done?'':'。上次辨識沒做完，做到 '+fmtTs(d.pos||(last?last.t:0))+'。重新選同一支影片，就會出現「接著做」的按鈕。'),'ok');
 }
 $('showTime').addEventListener('change',renderT);
 try{const v=localStorage.getItem('audiotool_enh');if(v!==null)$('enh').checked=v==='1';}catch(e){}
@@ -708,6 +744,7 @@ $('tshare').onclick=async()=>{
 
 // Whisper 在沒有人聲時常會「幻聽」出這類字，過濾掉
 function isHallucination(t){
+  if(isBracketOnly(t))return true;
   const x=t.replace(/[\s。，、.!！?？…]+/g,'');
   return /^[\(（\[【]?(字幕|中文字幕|字幕由.*|字幕志願者.*|請不吝點贊.*|請訂閱.*|訂閱.*|謝謝觀看|感謝觀看|謝謝收看|謝謝大家|謝謝|明鏡與點點欄目|Amaraorg.*|Thankyouforwatching|Thanksforwatching|Subscribe.*)[\)）\]】]?$/i.test(x);
 }
@@ -719,8 +756,9 @@ async function runASR(model,lang,forceWasm){
   const RATE=16000,WIN=30*RATE,total=Math.max(1,(tE==null?dur:tE)-tS);
   const enh=$('enh').checked;
   const opts={task:'transcribe',return_timestamps:true};if(lang)opts.language=lang;
-  const it=pcmBlocks(file,{start:tS,end:rangeEnd(),rate:RATE,secsPerBlock:120,onExtract:p=>setTBar(p*.05)})[Symbol.asyncIterator]();
-  let buf=new Float32Array(0),base=tS,cur=0,ended=false;
+  const from=resumeFrom!=null?resumeFrom:tS;
+  const it=pcmBlocks(file,{start:from,end:rangeEnd(),rate:RATE,secsPerBlock:120,onExtract:p=>setTBar(p*.05)})[Symbol.asyncIterator]();
+  let buf=new Float32Array(0),base=from,cur=0,ended=false;
   const fill=async()=>{
     while(!ended&&buf.length-cur<WIN){
       const r=await it.next();
@@ -763,7 +801,7 @@ async function runASR(model,lang,forceWasm){
       }
       if(lines.length){renderT();$('tresult').hidden=false;}
     }
-    cur+=adv;
+    cur+=adv;asrPos=base+cur/RATE;saveLast();
     const done=base+cur/RATE-tS;
     setTBar(.05+.95*Math.min(1,done/total));
     setTStatus('辨識中… '+fmtTs(done)+' / '+fmtTs(total)+(asrDevice==='webgpu'?'（GPU 加速）':''));
@@ -771,32 +809,61 @@ async function runASR(model,lang,forceWasm){
   }
 }
 
-$('tgo').onclick=async()=>{
+async function startTranscribe(resume){
   if(!file||tbusy)return;
-  tbusy=true;stopFlag=false;$('tgo').disabled=true;$('tstop').hidden=false;$('tstop').disabled=false;
+  let from=null;
+  if(resume&&canResume(file)){
+    const d=restored;lines=d.lines||[];from=d.pos;
+    if(d.range){tS=d.range[0];tE=d.range[1];}
+    if(d.model)$('model').value=d.model;if(d.lang!=null)$('lang').value=d.lang;
+    tnameEdited=!!d.edited;if(d.name)$('tname').value=d.name;
+  }else{lines=[];tnameEdited=false;}
+  tbusy=true;stopFlag=false;$('tgo').disabled=true;$('tresume').hidden=true;$('tstop').hidden=false;$('tstop').disabled=false;
   $('lang').disabled=$('model').disabled=true;updTrim();
-  lines=[];tnameEdited=false;tDone=false;restored=null;renderT();$('tresult').hidden=true;setTBar(0);
-  const lock=await wake();const t0=performance.now();
+  tDone=false;restored=null;renderT();$('tresult').hidden=!lines.length;setTBar(0);
   const model=$('model').value,lang=$('lang').value;
+  asrSig={name:file.name,size:file.size};asrRange=[tS,tE];asrModel=model;asrLang=lang;asrPos=from||tS;resumeFrom=from;
+  const lock=await wake();const t0=performance.now();keepAlive(true);
   try{
     try{await runASR(model,lang,false);}
     catch(e){
       if(asrDevice==='webgpu'&&!lines.length&&!ERR[e.message]){setTStatus('GPU 加速失敗，改用一般模式重試…');await runASR(model,lang,true);}
       else throw e;
     }
-    setTBar(1);tDone=!stopFlag;saveLast();
+    setTBar(1);tDone=!stopFlag;if(tDone)asrPos=0;saveLast();
     const secs=Math.round((performance.now()-t0)/1000);
     if(!lines.length)setTStatus(stopFlag?'已停止，還沒有辨識到文字。':'沒有辨識到說話的聲音。如果錄音裡確實有人說話，可以把語言改成「自動判斷」再試一次。','err');
-    else setTStatus((stopFlag?'已停止，保留目前的文字。':'完成！')+'共 '+lines.length+' 段，花了 '+fmtTs(secs)+'。','ok');
+    else setTStatus((stopFlag?'已停止，保留目前的文字（之後可以按「接著做」繼續）。':'完成！')+'共 '+displayLines(lines).length+' 句，花了 '+fmtTs(secs)+'。','ok');
   }catch(e){
     setTStatus((ERR[e.message]&&e.message!=='NOT_AAC'&&e.message!=='NOT_MP4'&&e.message!=='PARSE'?ERR[e.message]:
       ('逐字稿失敗：'+(e.message||e)+'。請確認網路（第一次要下載模型），或縮短範圍再試。'))+(e.detail?'（代碼：'+e.detail+'）':''),'err');
   }finally{
     tbusy=false;$('tgo').disabled=!file;$('tstop').hidden=true;$('lang').disabled=$('model').disabled=false;updTrim();
     if(lock)try{lock.release();}catch(e){}
+    keepAlive(false);
   }
-};
-$('tstop').onclick=()=>{stopFlag=true;$('tstop').disabled=true;setTStatus('正在停止（目前這一段辨識完就停）…');};
+}
+$('tgo').onclick=()=>startTranscribe(false);
+$('tresume').onclick=()=>startTranscribe(true);
+/* ---------- 背景保持運作：播放聽不到的聲音，讓 Chrome 比較不會暫停 ---------- */
+let kaAudio=null;
+function keepAlive(on){
+  try{
+    if(on){
+      if(!kaAudio){
+        const sr=8000,n=sr*2,b=new ArrayBuffer(44+n*2),v=new DataView(b);
+        const w=(o,str)=>{for(let i=0;i<str.length;i++)v.setUint8(o+i,str.charCodeAt(i));};
+        w(0,'RIFF');v.setUint32(4,36+n*2,true);w(8,'WAVE');w(12,'fmt ');v.setUint32(16,16,true);v.setUint16(20,1,true);v.setUint16(22,1,true);
+        v.setUint32(24,sr,true);v.setUint32(28,sr*2,true);v.setUint16(32,2,true);v.setUint16(34,16,true);w(36,'data');v.setUint32(40,n*2,true);
+        for(let i=0;i<n;i++)v.setInt16(44+i*2,(Math.random()*4-2)|0,true); // 極小雜訊，聽不到
+        kaAudio=new Audio(URL.createObjectURL(new Blob([b],{type:'audio/wav'})));kaAudio.loop=true;kaAudio.volume=0.01;
+      }
+      kaAudio.play().catch(()=>{});
+      if('mediaSession' in navigator)navigator.mediaSession.metadata=new MediaMetadata({title:'逐字稿辨識中…',artist:'影片轉音檔'});
+    }else if(kaAudio){kaAudio.pause();}
+  }catch(e){}
+}
+$('tstop').onclick=()=>{stopFlag=true;tDone=false;$('tstop').disabled=true;setTStatus('正在停止（目前這一段辨識完就停）…');};
 
 $('copy').onclick=async()=>{
   const ta=$('ttext');const txt=ta.value;if(!txt)return;
