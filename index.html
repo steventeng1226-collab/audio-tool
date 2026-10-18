@@ -102,7 +102,7 @@ footer{color:var(--sub);font-size:12px;line-height:1.6}
       <g fill="#f4f2ee"><rect x="300" y="196" width="28" height="120" rx="14"/><rect x="344" y="146" width="28" height="220" rx="14"/><rect x="388" y="216" width="28" height="80" rx="14"/></g>
     </svg>
     <div class="htext">
-      <h1>影片轉音檔 <span class="ver" id="ver">v1.1.5</span></h1>
+      <h1>影片轉音檔 <span class="ver" id="ver">v1.1.6</span></h1>
       <p class="tag">支援 MP4、MOV、WebM、MKV 等手機常見格式。</p>
     </div>
   </header>
@@ -190,7 +190,7 @@ footer{color:var(--sub);font-size:12px;line-height:1.6}
 <script src="https://cdnjs.cloudflare.com/ajax/libs/lamejs/1.2.1/lame.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/opencc-js@1.0.5/dist/umd/cn2t.js"></script>
 <script>
-const VERSION='v1.1.5';
+const VERSION='v1.1.6';
 const TF_URL='https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.7.5';
 const $=id=>document.getElementById(id);
 $('ver').textContent=VERSION;
@@ -243,11 +243,11 @@ function extractAudio(file,opts){
   const {start=0,end=Infinity,onProgress=()=>{}}=opts||{};
   return new Promise((resolve,reject)=>{
     const mp4=MP4Box.createFile();
-    let track=null,info=null,frames=[],times=[],done=false,got=0,total=0,failed=false;
+    let track=null,info=null,frames=[],times=[],done=false,got=0,total=0,failed=false,t0=null,trackDesc='',allCount=0;
     const fail=e=>{if(!failed){failed=true;reject(e);}};
     mp4.onError=()=>fail(new Error('PARSE'));
     mp4.onReady=inf=>{
-      track=inf.audioTracks&&inf.audioTracks[0];
+      const ats=(inf.audioTracks||[]).slice().sort((a,b)=>(b.nb_samples||0)-(a.nb_samples||0));track=ats[0]||null;trackDesc=ats.map(a=>a.codec+'/'+a.nb_samples).join(',');
       if(!track)return fail(new Error('NO_AUDIO'));
       info={codec:track.codec,sr:(track.audio&&track.audio.sample_rate)||44100,ch:(track.audio&&track.audio.channel_count)||2,asc:null,adts:null};
       if(/^mp4a/.test(track.codec)){
@@ -266,7 +266,7 @@ function extractAudio(file,opts){
     };
     mp4.onSamples=(id,user,samples)=>{
       for(const s of samples){
-        const t=s.cts/s.timescale;got++;
+        if(t0===null)t0=s.cts/s.timescale;const t=s.cts/s.timescale-t0;got++;allCount++;
         if(t<start||t>=end)continue;
         frames.push(new Uint8Array(s.data));times.push(t);
       }
@@ -284,7 +284,7 @@ function extractAudio(file,opts){
       if(failed)return;
       mp4.flush();
       if(!track)return fail(new Error('NOT_MP4'));
-      if(!frames.length)return fail(new Error('EMPTY'));
+      if(!frames.length){const e=new Error(allCount?'EMPTY':'NO_AUDIO');e.detail='tracks:'+trackDesc+' samples:'+allCount+' range:'+start+'-'+end;return fail(e);}
       info.frames=frames;info.times=times;
       resolve(info);
     })().catch(fail);
@@ -377,7 +377,7 @@ async function* pcmBlocks(file,{start=0,end=null,rate,secsPerBlock=240,onExtract
     let yielded=false;
     try{
       for await(const b of wcBlocks(info,{rate,secsPerBlock})){yielded=true;lastDecodePath='webcodecs';yield b;}
-      if(yielded)return;
+      if(yielded)return;why.push('wc:no-output');
     }catch(e){if(yielded)throw new Error('DECODE');why.push('wc:'+(e.message||e));}
   }
   // 2) AAC 分段解碼
