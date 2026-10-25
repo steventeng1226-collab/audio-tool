@@ -113,7 +113,7 @@ footer{color:var(--sub);font-size:12px;line-height:1.6}
       <g fill="#f4f2ee"><rect x="300" y="196" width="28" height="120" rx="14"/><rect x="344" y="146" width="28" height="220" rx="14"/><rect x="388" y="216" width="28" height="80" rx="14"/></g>
     </svg>
     <div class="htext">
-      <h1>影片轉音檔 <span class="ver" id="ver">v1.2.4</span></h1>
+      <h1>影片轉音檔 <span class="ver" id="ver">v1.2.5</span></h1>
       <p class="tag">支援 MP4、MOV、WebM、MKV 等手機常見格式。</p>
     </div>
   </header>
@@ -132,10 +132,10 @@ footer{color:var(--sub);font-size:12px;line-height:1.6}
 
   <section class="step" aria-labelledby="s2">
     <h2 id="s2"><span class="num">2</span>擷取範圍（可略過）</h2>
-    <p class="hint">直接輸入時間（例如 12:30 或 1:05:00），或把影片播放／拖到想要的位置再按「設為目前」。不設就是整段。音檔和逐字稿都用這個範圍。</p>
+    <p class="hint">直接輸入數字：0130 = 1分30秒、4500 = 45分、10500 = 1小時5分；或把影片播放／拖到想要的位置再按「設為目前」。不設就是整段。音檔和逐字稿都用這個範圍。</p>
     <div class="trim">
-      <div class="trow"><span class="lab">開始</span><input class="time" id="tStart" type="text" inputmode="decimal" value="00:00.0" aria-label="開始時間" autocomplete="off"><button id="setStart" disabled>設為目前</button></div>
-      <div class="trow"><span class="lab">結束</span><input class="time" id="tEnd" type="text" inputmode="decimal" value="--:--.-" aria-label="結束時間" autocomplete="off"><button id="setEnd" disabled>設為目前</button></div>
+      <div class="trow"><span class="lab">開始</span><input class="time" id="tStart" type="text" inputmode="numeric" value="00:00.0" aria-label="開始時間" autocomplete="off"><button id="setStart" disabled>設為目前</button></div>
+      <div class="trow"><span class="lab">結束</span><input class="time" id="tEnd" type="text" inputmode="numeric" value="--:--.-" aria-label="結束時間" autocomplete="off"><button id="setEnd" disabled>設為目前</button></div>
       <div class="row"><span class="span" id="tSpan">長度：整段</span><button class="small" id="clearTrim" disabled>清除範圍</button></div>
       <div id="trimMsg" role="status"></div>
     </div>
@@ -221,7 +221,7 @@ footer{color:var(--sub);font-size:12px;line-height:1.6}
 <script src="https://cdnjs.cloudflare.com/ajax/libs/lamejs/1.2.1/lame.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/opencc-js@1.0.5/dist/umd/cn2t.js"></script>
 <script>
-const VERSION='v1.2.4';
+const VERSION='v1.2.5';
 const TF_URL='https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.7.5';
 const $=id=>document.getElementById(id);
 $('ver').textContent=VERSION;
@@ -244,6 +244,12 @@ function rangeEnd(){return tE==null?null:tE;}
 function trimMsg(t,cls){const e=$('trimMsg');e.textContent=t;e.className=cls||'';}
 function parseT(v){
   v=(v||'').trim().replace(/：/g,':').replace(/[^\d:.]/g,'');if(!v)return NaN;
+  // 只有數字：0130 = 1分30秒、4500 = 45分、10500 = 1小時5分
+  if(/^\d+$/.test(v)){
+    if(v.length<=2)return +v;
+    const ss=+v.slice(-2),mm=+v.slice(-4,-2),hh=v.length>4?+v.slice(0,-4):0;
+    return hh*3600+mm*60+ss;
+  }
   const p=v.split(':').map(Number);if(p.some(isNaN)||p.length>3)return NaN;
   return p.reduce((a,x)=>a*60+x,0);
 }
@@ -274,13 +280,13 @@ $('file').addEventListener('change',onPick);$('file2').addEventListener('change'
 $('vid').addEventListener('loadedmetadata',()=>{dur=$('vid').duration||0;
   const m=$('fileinfo').querySelector('.meta');if(m)m.textContent=fmtSize(file.size)+'　·　'+fmtT(dur);updTrim();});
 function applyStart(t){
-  if(isNaN(t)||t<0){trimMsg('時間格式不對，請輸入像 12:30 或 1:05:00。','err');updTrim();return;}
+  if(isNaN(t)||t<0){trimMsg('時間格式不對，請輸入數字，例如 0130（1分30秒）。','err');updTrim();return;}
   if(dur&&t>=dur){trimMsg('開始時間超過影片長度（'+fmtT(dur)+'）。','err');updTrim();return;}
   if(tE!=null&&t>=tE){trimMsg('開始時間要早於結束時間（'+fmtT(tE)+'）。','err');updTrim();return;}
   tS=t;updTrim();trimMsg('開始時間設為 '+fmtT(t)+'。','ok');
 }
 function applyEnd(t){
-  if(isNaN(t)||t<0){trimMsg('時間格式不對，請輸入像 12:30 或 1:05:00。','err');updTrim();return;}
+  if(isNaN(t)||t<0){trimMsg('時間格式不對，請輸入數字，例如 0130（1分30秒）。','err');updTrim();return;}
   if(dur&&t>dur)t=dur;
   if(t<=tS){trimMsg('結束時間要晚於開始時間（'+fmtT(tS)+'）。','err');updTrim();return;}
   tE=(dur&&Math.abs(t-dur)<0.05&&tS===0)?null:t;updTrim();trimMsg('結束時間設為 '+fmtT(t)+'。','ok');
