@@ -113,7 +113,7 @@ footer{color:var(--sub);font-size:12px;line-height:1.6}
       <g fill="#f4f2ee"><rect x="300" y="196" width="28" height="120" rx="14"/><rect x="344" y="146" width="28" height="220" rx="14"/><rect x="388" y="216" width="28" height="80" rx="14"/></g>
     </svg>
     <div class="htext">
-      <h1>影片轉音檔 <span class="ver" id="ver">v1.2.5</span></h1>
+      <h1>影片轉音檔 <span class="ver" id="ver">v1.3.0</span></h1>
       <p class="tag">支援 MP4、MOV、WebM、MKV 等手機常見格式。</p>
     </div>
   </header>
@@ -174,12 +174,12 @@ footer{color:var(--sub);font-size:12px;line-height:1.6}
 
   <section class="step" aria-labelledby="s5">
     <h2 id="s5"><span class="num">5</span>逐字稿</h2>
-    <p class="hint">把影片裡說的話轉成文字。第一次使用會下載語音辨識模型（準確約 400 MB、快速約 80 MB），之後存在手機裡，不用再下載；每次打開 App 會從手機載入模型，需要幾秒鐘。</p>
+    <p class="hint">把影片裡說的話轉成文字。第一次使用會下載語音辨識模型（準確約 400 MB、快速約 80 MB、最準確約 1.4 GB），之後存在手機裡，不用再下載；每次打開 App 會從手機載入模型，需要幾秒鐘。</p>
     <div class="row">
       <div class="field"><label for="lang">語言</label>
         <select id="lang"><option value="chinese">中文</option><option value="english">English</option><option value="">自動判斷</option></select></div>
       <div class="field"><label for="model">模式</label>
-        <select id="model"><option value="onnx-community/whisper-small" selected>準確（較慢）</option><option value="onnx-community/whisper-base">快速</option></select></div>
+        <select id="model"><option value="onnx-community/whisper-small" selected>準確（較慢）</option><option value="onnx-community/whisper-base">快速</option><option value="onnx-community/whisper-large-v3-turbo">最準確（試驗，約 1.4 GB）</option></select></div>
     </div>
     <div class="row">
       <button class="primary big" id="tgo" disabled>產生逐字稿</button>
@@ -201,7 +201,13 @@ footer{color:var(--sub);font-size:12px;line-height:1.6}
         <button id="tsheet">備份到試算表</button>
         <a class="btn" id="tdl" href="#">下載 .txt</a>
       </div>
-      <button class="small" id="tshare" style="align-self:flex-start">分享到 LINE／微信…</button>
+      <div class="row">
+        <button class="small" id="copyFix">複製＋校正指令（給 ChatGPT）</button>
+        <button class="small" id="tshare">分享到 LINE／微信…</button>
+      </div>
+      <details id="glossBox"><summary class="hint" style="cursor:pointer">常用專有名詞（校正時一起給 ChatGPT）</summary>
+        <textarea id="gloss" style="min-height:70px" placeholder="例如：CAPEX、KPI、克里夫、水花、華勤、Large Molding、腺苷、皮質醇"></textarea>
+      </details>
     </div>
   </section>
 
@@ -221,7 +227,7 @@ footer{color:var(--sub);font-size:12px;line-height:1.6}
 <script src="https://cdnjs.cloudflare.com/ajax/libs/lamejs/1.2.1/lame.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/opencc-js@1.0.5/dist/umd/cn2t.js"></script>
 <script>
-const VERSION='v1.2.5';
+const VERSION='v1.3.0';
 const TF_URL='https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.7.5';
 const $=id=>document.getElementById(id);
 $('ver').textContent=VERSION;
@@ -676,7 +682,8 @@ async function loadASR(model,forceWasm){
     try{
       const ad=await navigator.gpu.requestAdapter();
       if(ad){
-        const enc=(saved&&saved.enc)||(ad.features&&ad.features.has('shader-f16')?'fp16':'fp32');
+        const f16=ad.features&&ad.features.has('shader-f16');
+        const enc=(saved&&saved.enc)||(/large/.test(model)?(f16?'fp16':'q4'):(f16?'fp16':'fp32'));
         asr=await T.pipeline('automatic-speech-recognition',model,{device:'webgpu',dtype:{encoder_model:enc,decoder_model_merged:'q4'},progress_callback:cb});
         asrDevice='webgpu';remember({device:'webgpu',enc});
       }
@@ -800,11 +807,13 @@ async function runASR(model,lang,forceWasm){
   const opts={task:'transcribe',return_timestamps:true};if(lang)opts.language=lang;
   const from=resumeFrom!=null?resumeFrom:tS;
   const it=pcmBlocks(file,{start:from,end:rangeEnd(),rate:RATE,secsPerBlock:120,onExtract:p=>setTBar(p*.05)})[Symbol.asyncIterator]();
-  let buf=new Float32Array(0),base=from,cur=0,ended=false;
+  // 頭尾各補一小段靜音，避免第一句、最後一句的字被吃掉
+  const PADH=Math.round(RATE*0.6),PADT=RATE;
+  let buf=new Float32Array(PADH),base=from-PADH/RATE,cur=0,ended=false;
   const fill=async()=>{
     while(!ended&&buf.length-cur<WIN){
       const r=await it.next();
-      if(r.done){ended=true;break;}
+      if(r.done){ended=true;const m=new Float32Array(buf.length-cur+PADT);m.set(buf.subarray(cur));base+=cur/RATE;cur=0;buf=m;break;}
       const b=r.value,n=b.L.length;
       let mono=new Float32Array(n);
       if(b.R===b.L)mono.set(b.L);else for(let k=0;k<n;k++)mono[k]=(b.L[k]+b.R[k])*.5;
@@ -839,7 +848,7 @@ async function runASR(model,lang,forceWasm){
         let text=collapseRepeats(toTW((c.text||'').trim()));
         if(!text||isHallucination(text))continue;
         const ts=(c.timestamp&&c.timestamp[0]!=null)?c.timestamp[0]:0;
-        lines.push({t:t0+ts,text});
+        lines.push({t:Math.max(from,t0+ts),text});
       }
       if(lines.length){renderT();$('tresult').hidden=false;}
     }
@@ -907,6 +916,26 @@ function keepAlive(on){
 }
 $('tstop').onclick=()=>{stopFlag=true;tDone=false;$('tstop').disabled=true;setTStatus('正在停止（目前這一段辨識完就停）…');};
 
+const GLOSS_KEY='audiotool_gloss';
+try{$('gloss').value=localStorage.getItem(GLOSS_KEY)||'';}catch(e){}
+$('gloss').addEventListener('input',()=>{try{localStorage.setItem(GLOSS_KEY,$('gloss').value);}catch(e){}});
+function fixPrompt(txt){
+  const g=$('gloss').value.trim();
+  return '以下是用語音辨識自動產生的逐字稿，裡面有不少同音錯字。請幫我校正：\n'+
+    '1. 依上下文修正同音錯字和專有名詞，不改變原意，也不要刪減或增加內容（保持逐字稿，不是摘要）。\n'+
+    '2. 加上標點符號；依說話內容判斷是誰在說話，用「A：」「B：」標示，不確定就不標。\n'+
+    '3. 保留每行開頭的時間標記。\n'+
+    '4. 沒把握的字詞，在後面加註［?］。\n'+
+    '5. 用繁體中文輸出。最後列出你改過的字詞（原字 → 改後）。\n'+
+    (g?'\n常用專有名詞（請優先採用）：'+g.replace(/\s*\n\s*/g,'、')+'\n':'')+
+    '\n逐字稿：\n'+txt;
+}
+$('copyFix').onclick=async()=>{
+  const txt=$('ttext').value;if(!txt)return;const all=fixPrompt(txt);
+  try{await navigator.clipboard.writeText(all);}
+  catch(e){const ta=document.createElement('textarea');ta.value=all;document.body.appendChild(ta);ta.select();try{document.execCommand('copy');}catch(_){}ta.remove();}
+  const b=$('copyFix');b.textContent='已複製 ✓ 到 ChatGPT 貼上即可';setTimeout(()=>b.textContent='複製＋校正指令（給 ChatGPT）',2200);
+};
 $('copy').onclick=async()=>{
   const ta=$('ttext');const txt=ta.value;if(!txt)return;
   try{await navigator.clipboard.writeText(txt);}
@@ -965,9 +994,9 @@ async function modelStatus(){
   let persisted=false,mb=0,has={};
   try{persisted=await navigator.storage.persisted();if(!persisted)persisted=await navigator.storage.persist();}catch(e){}
   try{const c=await caches.open('transformers-cache');for(const r of await c.keys()){
-      const m=r.url.match(/onnx-community\/(whisper-[a-z]+)\//);if(m&&/\.onnx/.test(r.url))has[m[1]]=1;}}catch(e){}
+      const m=r.url.match(/onnx-community\/(whisper-[\w.-]+?)\//);if(m&&/\.onnx/.test(r.url))has[m[1]]=1;}}catch(e){}
   try{const est=await navigator.storage.estimate();mb=Math.round((est.usage||0)/1048576);}catch(e){}
-  const names={'whisper-small':'準確','whisper-base':'快速'};
+  const names={'whisper-small':'準確','whisper-base':'快速','whisper-large-v3-turbo':'最準確'};
   const list=Object.keys(has).map(k=>names[k]||k);
   $('mstat').textContent='模型：'+(list.length?'已存在手機（'+list.join('、')+'）':'尚未下載')+'　已用空間 '+mb+' MB　'+(persisted?'永久保存 ✓':'未設永久保存（Chrome 可能在空間不足時清掉）');
 }
